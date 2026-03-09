@@ -2,6 +2,13 @@
 
 macOS에서 한글 파일명의 자소 분리(NFD) 문제를 자동으로 감지하고 NFC로 변환하는 메뉴 바 앱입니다.
 
+## 스크린샷
+
+| NFD 파일 감지 | 우클릭 변환 | 변환 알림 |
+|:---:|:---:|:---:|
+| ![NFD 태그 표시](screen/테스트.png) | ![컨텍스트 메뉴](screen/변환.png) | ![변환 완료 알림](screen/알림.png) |
+| NFD 파일에 빨간 `NFD` 태그 자동 부여 | Finder 우클릭 → "한글 파일명 NFC 변환" | 변환 완료 시 macOS 알림 표시 |
+
 ## 문제
 
 macOS는 파일명을 NFD(Normalization Form Decomposition) 방식으로 저장하여, 한글 파일명이 자소 단위로 분리되는 현상이 발생합니다. 예를 들어 `한글.txt`가 `ㅎㅏㄴㄱㅡㄹ.txt`처럼 보이는 문제입니다. 이 앱은 이런 파일명을 NFC(Normalization Form Composition)로 자동 변환합니다.
