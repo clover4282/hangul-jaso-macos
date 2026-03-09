@@ -67,6 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     let converted = self.convertDirectoryContents(atPath: dirPath, recursive: false)
                     if converted > 0 {
                         NSLog("HangulJaso: auto-converted %d files in %@", converted, dirPath)
+                        if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
+                            self.sendNotification(
+                                title: "한글 자소 정리",
+                                body: "\(converted)개 파일을 NFC로 자동 변환했습니다"
+                            )
+                        }
                         // Re-scan to update tags after conversion
                         self.scanDirectory(dirPath, recursive: false)
                         // Start cooldown to prevent rename→FSEvents loop
@@ -281,11 +287,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let nfc = rawName.precomposedStringWithCanonicalMapping
             let isNFD = !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars)
 
+            let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
             if isNFD {
-                let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
                 NSLog("HangulJaso: NFD found: %@ -> tag %@", rawName, fileURL.path)
                 addTag(tagName, to: fileURL)
                 foundNFD = true
+            } else {
+                // Clean up stale NFD tag from previously converted files
+                removeTag(tagName, from: fileURL)
             }
         }
 

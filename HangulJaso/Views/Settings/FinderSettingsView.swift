@@ -4,6 +4,7 @@ struct FinderSettingsView: View {
     @Environment(HangulJasoViewModel.self) private var viewModel
     @State private var installResult: String?
     @State private var workflowStatus: [String: Bool] = [:]
+    @State private var extensionEnabled = false
 
     private let workflowNames = [
         "한글 파일명 NFC 변환"
@@ -14,9 +15,31 @@ struct FinderSettingsView: View {
             Text("Finder 연동")
                 .font(.headline)
 
-            // MARK: - 상태 확인
+            // MARK: - Finder Sync Extension 상태
             VStack(alignment: .leading, spacing: 8) {
-                Text("상태")
+                Text("Finder 확장 프로그램")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                StatusRow(
+                    label: "컨텍스트 메뉴 & 도구막대",
+                    isOK: extensionEnabled,
+                    okText: "활성",
+                    failText: "비활성"
+                )
+
+                if !extensionEnabled {
+                    Text("시스템 설정 → 개인정보 보호 및 보안 → 확장 프로그램 → 추가된 확장 프로그램에서 HangulJaso의 Finder 확장을 활성화하세요.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
+
+            // MARK: - Quick Action 상태
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Quick Action (빠른 동작)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -63,21 +86,18 @@ struct FinderSettingsView: View {
 
             Divider()
 
-            // MARK: - Quick Action 사용 방법
+            // MARK: - 사용 방법
             VStack(alignment: .leading, spacing: 8) {
-                Text("Quick Action 사용 방법")
+                Text("사용 방법")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    toolbarStep("cursorarrow.click.2", "Finder에서 파일/폴더를 우클릭 → 빠른 동작 → \"한글 파일명 NFC 변환\"")
-                    toolbarStep("sidebar.right", "또는 Finder 보기 → 미리보기 보기를 켜면 하단에 Quick Action 버튼 표시")
+                    usageStep("cursorarrow.click.2", "Finder에서 파일/폴더를 우클릭 → \"한글 파일명 NFC 변환\" (Finder 확장)")
+                    usageStep("macwindow", "Finder 보기 → 도구막대 사용자화 → \"한글 NFC 변환\"을 도구막대로 드래그")
+                    usageStep("bolt.fill", "또는 우클릭 → 빠른 동작 → \"한글 파일명 NFC 변환\" (Quick Action)")
                 }
                 .font(.callout)
-
-                Text("Quick Action이 보이지 않으면 시스템 설정 → 개인정보 보호 및 보안 → 확장 프로그램 → 빠른 동작에서 활성화하세요.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary))
@@ -86,7 +106,7 @@ struct FinderSettingsView: View {
         .onAppear { refreshStatus() }
     }
 
-    private func toolbarStep(_ icon: String, _ text: String) -> some View {
+    private func usageStep(_ icon: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: icon)
                 .frame(width: 16)
@@ -99,6 +119,22 @@ struct FinderSettingsView: View {
         for name in workflowNames {
             workflowStatus[name] = viewModel.workflowInstaller.isInstalled(name: name)
         }
+        // Check Finder Sync Extension registration
+        extensionEnabled = checkFinderSyncEnabled()
+    }
+
+    private func checkFinderSyncEnabled() -> Bool {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
+        process.arguments = ["-m", "-p", "com.apple.FinderSync"]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try? process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return output.contains("com.clover4282.hanguljaso.finder")
     }
 }
 

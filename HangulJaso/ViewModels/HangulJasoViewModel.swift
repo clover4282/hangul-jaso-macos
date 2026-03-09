@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import ServiceManagement
 import UserNotifications
 
 // MARK: - HangulJasoViewModel
@@ -71,9 +70,9 @@ final class HangulJasoViewModel {
 
     func updateLoginItem(enabled: Bool) {
         if enabled {
-            try? SMAppService.mainApp.register()
+            LaunchAgentService.install()
         } else {
-            try? SMAppService.mainApp.unregister()
+            LaunchAgentService.uninstall()
         }
     }
 
