@@ -52,3 +52,16 @@ macOS menu bar app (SwiftUI `MenuBarExtra` with `.menu` style) with no Dock icon
 - Code signing: `DEVELOPMENT_TEAM: 9P8DG7976Y`, `CODE_SIGN_IDENTITY: Apple Development`
 - FinderSync Extension requires App Sandbox entitlement to register with pluginkit
 - Default watched folders (Downloads, Desktop, Documents) added on first launch
+
+**Scan triggers (auto-convert):**
+- App launch: full recursive scan of all auto-convert folders
+- FSEvents: real-time file change detection → rescan affected directory
+- Periodic: 1-hour interval full scan of auto-convert folders
+- Folder add: immediate full scan when user adds a watched folder
+- `HangulJasoRescanDirectory` / `HangulJasoFullScanDirectory` notifications coordinate between ViewModel and AppDelegate
+
+**CPU optimization notes:**
+- Single `opendir`/`readdir` pass for both NFD detection and NFC conversion (no separate scan+convert)
+- `removeTag` only called on files that actually had NFD tags (not all NFC files)
+- `isScanning` flag prevents concurrent scan overlap
+- Deduplication: FSEvents batched by parent directory to avoid redundant rescans

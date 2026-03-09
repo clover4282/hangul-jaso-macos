@@ -40,6 +40,12 @@ final class HangulJasoViewModel {
         saveWatchedFolders()
         if folder.enabled {
             monitorService.startWatching(path: folder.path)
+            // 추가 즉시 전체 스캔+변환 요청
+            NotificationCenter.default.post(
+                name: Notification.Name("HangulJasoFullScanDirectory"),
+                object: folder.path,
+                userInfo: ["autoConvert": folder.autoConvert]
+            )
         }
     }
 
