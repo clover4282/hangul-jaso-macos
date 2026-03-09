@@ -63,21 +63,19 @@ struct FinderSettingsView: View {
 
             Divider()
 
-            // MARK: - Finder 도구막대 안내
+            // MARK: - Quick Action 사용 방법
             VStack(alignment: .leading, spacing: 8) {
-                Text("Finder 도구막대에 추가하기")
+                Text("Quick Action 사용 방법")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    toolbarStep("1.circle.fill", "시스템 설정 → 개인정보 보호 및 보안 → 확장 프로그램 → Finder 확장 프로그램에서 \"한글 파일명 NFC 변환\" 활성화")
-                    toolbarStep("2.circle.fill", "Finder 메뉴에서 보기 → 도구막대 사용자화 선택")
-                    toolbarStep("3.circle.fill", "Quick Action 목록에서 \"한글 파일명 NFC 변환\"을 도구막대로 드래그")
-                    toolbarStep("4.circle.fill", "\"완료\"를 눌러 저장")
+                    toolbarStep("cursorarrow.click.2", "Finder에서 파일/폴더를 우클릭 → 빠른 동작 → \"한글 파일명 NFC 변환\"")
+                    toolbarStep("sidebar.right", "또는 Finder 보기 → 미리보기 보기를 켜면 하단에 Quick Action 버튼 표시")
                 }
                 .font(.callout)
 
-                Text("도구막대에 추가하면 파일 선택 후 버튼 한 번으로 변환할 수 있습니다.")
+                Text("Quick Action이 보이지 않으면 시스템 설정 → 개인정보 보호 및 보안 → 확장 프로그램 → 빠른 동작에서 활성화하세요.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }

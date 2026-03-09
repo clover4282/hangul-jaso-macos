@@ -52,15 +52,18 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>paths=""
+					<string>url="hangul-jaso://convert?"
+first=true
 for f in "$@"; do
-    if [ -z "$paths" ]; then
-        paths="$f"
+    encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe='/'))" "$f")
+    if $first; then
+        url="${url}p=${encoded}"
+        first=false
     else
-        paths="$paths,$f"
+        url="${url}&amp;p=${encoded}"
     fi
 done
-open "hangul-jaso://convert?paths=$paths"</string>
+open "$url"</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>

@@ -11,6 +11,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build Debug configuration
+	xcodegen generate 2>&1 | grep -v "^⚙️" || true
 	xcodebuild -scheme $(SCHEME) -configuration Debug build | tail -3
 
 release: ## Build Release configuration

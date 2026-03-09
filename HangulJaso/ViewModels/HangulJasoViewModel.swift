@@ -96,10 +96,9 @@ final class HangulJasoViewModel {
         guard let host = url.host else { return }
         let paths = URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?
-            .first(where: { $0.name == "paths" })?
-            .value?
-            .split(separator: ",")
-            .map { URL(fileURLWithPath: String($0)) } ?? []
+            .filter { $0.name == "p" }
+            .compactMap { $0.value }
+            .map { URL(fileURLWithPath: $0) } ?? []
 
         guard !paths.isEmpty else { return }
 

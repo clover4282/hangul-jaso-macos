@@ -111,6 +111,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 userInfo: nil,
                 deliverImmediately: true
             )
+
+            // User notification
+            if totalConverted > 0 {
+                self.sendNotification(
+                    title: "한글 자소 정리",
+                    body: "\(totalConverted)개 파일을 NFC로 변환했습니다"
+                )
+            } else {
+                self.sendNotification(
+                    title: "한글 자소 정리",
+                    body: "변환할 NFD 파일이 없습니다"
+                )
+            }
         }
     }
 
@@ -330,6 +343,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 logger.notice("addTag OK: \(path, privacy: .public)")
             }
         }
+
+        // Clear FinderInfo color label to prevent Finder from re-creating color tags
+        clearFinderInfoColor(at: path)
     }
 
     private func removeTag(_ tag: String, from url: URL) {
@@ -376,6 +392,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         } else {
             _ = setxattr(path, finderInfoKey, &info, 32, 0, 0)
         }
+    }
+
+    private func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
