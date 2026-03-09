@@ -9,6 +9,8 @@ settings:
   base:
     SWIFT_VERSION: "5"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    DEVELOPMENT_TEAM: 9P8DG7976Y
+    CODE_SIGN_IDENTITY: "Apple Development"
 
 targets:
   HangulJaso:
@@ -24,8 +26,11 @@ targets:
       - script: |
           mkdir -p "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
           cp -R "${SRCROOT}/Workflows/한글 파일명 NFC 변환.workflow" "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/"
-          cp -R "${SRCROOT}/Workflows/한글 파일명 상태 확인.workflow" "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/"
         name: Copy Workflows
+        inputFiles:
+          - $(SRCROOT)/Workflows/한글 파일명 NFC 변환.workflow
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/한글 파일명 NFC 변환.workflow
     info:
       path: HangulJaso/Resources/Info.plist
       properties:
@@ -48,43 +53,6 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
-    dependencies:
-      - target: HangulJasoFinder
-
-  HangulJasoFinder:
-    type: app-extension
-    platform: macOS
-    sources:
-      - path: HangulJasoFinder
-        excludes:
-          - Resources
-    dependencies:
-      - sdk: FinderSync.framework
-    info:
-      path: HangulJasoFinder/Resources/Info.plist
-      properties:
-        CFBundlePackageType: "XPC!"
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.FinderSync
-          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).FinderSyncExtension"
-    entitlements:
-      path: HangulJasoFinder/Resources/HangulJasoFinder.entitlements
-      properties:
-        com.apple.security.application-groups:
-          - 9P8DG7976Y.com.clover4282.hanguljaso
-        com.apple.security.files.user-selected.read-write: true
-        com.apple.security.temporary-exception.files.home-directory.read-only: true
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.clover4282.hanguljaso.finder
-        PRODUCT_NAME: HangulJasoFinder
-        MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "1"
-        CODE_SIGN_STYLE: Automatic
-        ENABLE_HARDENED_RUNTIME: NO
-        LD_RUNPATH_SEARCH_PATHS:
-          - "$(inherited)"
-          - "@executable_path/../Frameworks"
-          - "@executable_path/../../../../Frameworks"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO

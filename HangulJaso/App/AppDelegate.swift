@@ -6,27 +6,35 @@ private let logger = Logger(subsystem: "com.clover4282.hanguljaso", category: "A
 
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     static let urlReceivedNotification = Notification.Name("HangulJasoURLReceived")
-    private let fileMonitor = FileMonitorService()
+
+    /// Debouncer: pending rescan work items keyed by directory path
+    private var pendingRescans: [String: DispatchWorkItem] = [:]
+    private let debounceQueue = DispatchQueue(label: "com.clover4282.hanguljaso.debounce")
+
+    /// Cooldown: recently converted directories (to prevent rename→FSEvents loop)
+    private var recentlyConverted: Set<String> = []
+    private let cooldownQueue = DispatchQueue(label: "com.clover4282.hanguljaso.cooldown")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
-        // Scan common directories for NFD files and share with Finder extension
+        // Auto-install Quick Action workflows
+        let installer = WorkflowInstaller()
+        _ = installer.installAll()
+
+        // Scan watched folders for NFD files and tag them
         scanAndShareNFDFiles()
 
-        // Start watching directories for file changes
-        startFileMonitoring()
-
-        // Listen for distributed notification from extension requesting a scan
-        DistributedNotificationCenter.default().addObserver(
+        // Listen for rescan requests from ViewModel (FSEvents changes)
+        NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleScanRequest(_:)),
-            name: Notification.Name("com.clover4282.hanguljaso.scanRequest"),
+            selector: #selector(handleRescanDirectory(_:)),
+            name: Notification.Name("HangulJasoRescanDirectory"),
             object: nil
         )
 
-        // Listen for convert requests from extension
+        // Listen for convert requests from Quick Actions
         DistributedNotificationCenter.default().addObserver(
             self,
             selector: #selector(handleConvertRequest(_:)),
@@ -35,54 +43,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
-    private func startFileMonitoring() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let dirs = ["Downloads", "Desktop", "Documents"].map { home + "/" + $0 }
+    @objc private func handleRescanDirectory(_ notification: Notification) {
+        guard let dirPath = notification.object as? String else { return }
+        let autoConvert = notification.userInfo?["autoConvert"] as? Bool ?? false
 
-        fileMonitor.setChangeHandler { [weak self] changedPaths in
-            guard let self else { return }
-            DispatchQueue.global(qos: .utility).async {
-                for changedPath in changedPaths {
-                    self.handleFileChange(changedPath)
-                }
-            }
+        // Skip if this directory was recently converted (cooldown)
+        var inCooldown = false
+        cooldownQueue.sync { inCooldown = recentlyConverted.contains(dirPath) }
+        if inCooldown {
+            NSLog("HangulJaso: skipping rescan (cooldown): %@", dirPath)
+            return
         }
 
-        for dir in dirs {
-            fileMonitor.startWatching(path: dir)
-        }
-    }
+        // Debounce: cancel pending rescan for same directory, schedule new one in 2s
+        debounceQueue.sync {
+            pendingRescans[dirPath]?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                // FSEvents-triggered scan: non-recursive (only the changed directory)
+                self.scanDirectory(dirPath, recursive: false)
 
-    private func handleFileChange(_ path: String) {
-        let url = URL(fileURLWithPath: path)
-        let dirPath = url.deletingLastPathComponent().path
-        let nfcName = url.lastPathComponent
-
-        guard let dir = opendir(dirPath) else { return }
-        defer { closedir(dir) }
-
-        var foundNFD = false
-
-        while let entry = readdir(dir) {
-            let nameLen = Int(entry.pointee.d_namlen)
-            let rawName: String = withUnsafePointer(to: entry.pointee.d_name) { ptr in
-                ptr.withMemoryRebound(to: UInt8.self, capacity: nameLen) { buf in
-                    String(bytes: UnsafeBufferPointer(start: buf, count: nameLen), encoding: .utf8) ?? ""
+                if autoConvert {
+                    let converted = self.convertDirectoryContents(atPath: dirPath, recursive: false)
+                    if converted > 0 {
+                        NSLog("HangulJaso: auto-converted %d files in %@", converted, dirPath)
+                        // Re-scan to update tags after conversion
+                        self.scanDirectory(dirPath, recursive: false)
+                        // Start cooldown to prevent rename→FSEvents loop
+                        self.cooldownQueue.sync { self.recentlyConverted.insert(dirPath) }
+                        self.cooldownQueue.asyncAfter(deadline: .now() + 5.0) {
+                            self.recentlyConverted.remove(dirPath)
+                        }
+                    }
                 }
-            }
-            guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
-            let nfc = rawName.precomposedStringWithCanonicalMapping
-            guard nfc == nfcName else { continue }
 
-            if !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars) {
-                // File is NFD — add tag
-                addTag("NFD", to: url)
-                foundNFD = true
-            } else {
-                // File is NFC — remove tag if present
-                removeTag("NFD", from: url)
+                self.debounceQueue.sync { self.pendingRescans.removeValue(forKey: dirPath) }
             }
-            break
+            pendingRescans[dirPath] = workItem
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0, execute: workItem)
         }
     }
 
@@ -116,8 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Recursively convert all NFD entries inside a directory (bottom-up)
-    private func convertDirectoryContents(atPath dirPath: String) -> Int {
+    /// Convert NFD entries inside a directory, optionally recursing into subdirectories (bottom-up)
+    private func convertDirectoryContents(atPath dirPath: String, recursive: Bool = true) -> Int {
         guard let dir = opendir(dirPath) else { return 0 }
         defer { closedir(dir) }
 
@@ -132,6 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }
             guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
+            // Skip hidden folders and files during auto-conversion
+            if Self.shouldSkipAutoConvert(rawName) { continue }
 
             let fullPath = dirPath + "/" + rawName
             let isDirectory = entry.pointee.d_type == DT_DIR
@@ -141,9 +141,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        // Recurse into subdirectories first (depth-first)
-        for subdir in subdirs {
-            converted += convertDirectoryContents(atPath: subdir)
+        // Recurse into subdirectories first (depth-first), only if recursive mode
+        if recursive {
+            for subdir in subdirs {
+                converted += convertDirectoryContents(atPath: subdir)
+            }
         }
 
         // Now convert all NFD entries in this directory (re-read after subdirs are converted)
@@ -159,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
 
+            // Skip temp/lock files that may be in use
+            if Self.shouldSkipAutoConvert(rawName) { continue }
+
             let nfc = rawName.precomposedStringWithCanonicalMapping
             guard !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars) else { continue }
 
@@ -171,6 +176,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         return converted
+    }
+
+    /// Check if a file/folder should be skipped during auto-conversion
+    private static func shouldSkipAutoConvert(_ name: String) -> Bool {
+        // Hidden files/folders (e.g. .git, .DS_Store)
+        name.hasPrefix(".") ||
+        // Office temp files (~$file.docx)
+        name.hasPrefix("~$") ||
+        // Lock/temp/swap files
+        name.hasSuffix(".tmp") || name.hasSuffix(".lock") ||
+        name.hasSuffix(".lck") || name.hasSuffix(".swp")
     }
 
     /// Convert a single item's name from NFD to NFC
@@ -203,38 +219,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return false
     }
 
-    @objc private func handleScanRequest(_ notification: Notification) {
-        if let dirPath = notification.object as? String {
-            scanDirectory(dirPath)
-        } else {
-            scanAndShareNFDFiles()
-        }
-        // Notify extension that scan is complete
-        DistributedNotificationCenter.default().postNotificationName(
-            Notification.Name("com.clover4282.hanguljaso.scanComplete"),
-            object: nil,
-            userInfo: nil,
-            deliverImmediately: true
-        )
-    }
-
     private func scanAndShareNFDFiles() {
         DispatchQueue.global(qos: .utility).async {
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
-            NSLog("HangulJaso: scanning home=%@", home)
-            let dirs = ["Downloads", "Desktop", "Documents"].map { home + "/" + $0 }
+            let dirs = self.loadWatchedFolderPaths()
+            NSLog("HangulJaso: scanning %d watched folders", dirs.count)
             for dir in dirs {
-                self.scanDirectory(dir)
+                self.scanDirectory(dir, isRoot: true)
             }
             NSLog("HangulJaso: scan complete")
         }
     }
 
-    private func scanDirectory(_ dirPath: String) {
-        guard let dir = opendir(dirPath) else { return }
+    private func loadWatchedFolderPaths() -> [String] {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let fileURL = appSupport
+            .appendingPathComponent("HangulJaso", isDirectory: true)
+            .appendingPathComponent(Constants.Defaults.watchedFoldersFileName)
+        guard let data = try? Data(contentsOf: fileURL),
+              let folders = try? JSONDecoder().decode([WatchedFolder].self, from: data) else { return [] }
+        return folders.filter(\.enabled).map(\.path)
+    }
+
+    /// Scans a directory for NFD filenames, tags them, and optionally recurses into subdirectories.
+    /// Returns `true` if any NFD entry was found in this directory or its children.
+    @discardableResult
+    private func scanDirectory(_ dirPath: String, isRoot: Bool = false, recursive: Bool = true) -> Bool {
+        guard let dir = opendir(dirPath) else { return false }
         defer { closedir(dir) }
 
         let tagName = "NFD"
+        var subdirs: [String] = []
+        var foundNFD = false
 
         while let entry = readdir(dir) {
             let nameLen = Int(entry.pointee.d_namlen)
@@ -244,6 +259,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }
             guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
+
+            let isDirectory = entry.pointee.d_type == DT_DIR
+            if isDirectory {
+                subdirs.append(dirPath + "/" + rawName)
+            }
+
             let nfc = rawName.precomposedStringWithCanonicalMapping
             let isNFD = !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars)
 
@@ -251,8 +272,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
                 NSLog("HangulJaso: NFD found: %@ -> tag %@", rawName, fileURL.path)
                 addTag(tagName, to: fileURL)
+                foundNFD = true
             }
         }
+
+        // Recurse into subdirectories (only if recursive mode)
+        if recursive {
+            for subdir in subdirs {
+                if scanDirectory(subdir) {
+                    foundNFD = true
+                }
+            }
+        }
+
+        // Tag or untag the folder itself based on whether it contains NFD entries
+        let folderURL = URL(fileURLWithPath: dirPath)
+        if !isRoot {
+            if foundNFD {
+                addTag(tagName, to: folderURL)
+            } else {
+                removeTag(tagName, from: folderURL)
+            }
+        }
+
+        return foundNFD
     }
 
     private func addTag(_ tag: String, to url: URL) {
@@ -347,6 +390,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 object: nil,
                 userInfo: ["url": url]
             )
+        }
+
+        // Hide the main window that macOS auto-opens on URL activation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            for window in NSApp.windows where window.title == "한글 자소 정리" {
+                window.orderOut(nil)
+            }
         }
     }
 

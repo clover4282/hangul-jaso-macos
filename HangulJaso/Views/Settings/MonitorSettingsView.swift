@@ -42,7 +42,7 @@ struct MonitorSettingsView: View {
 
                         Toggle("자동 변환", isOn: Binding(
                             get: { folder.autoConvert },
-                            set: { _ in viewModel.toggleWatchedFolder(folder) }
+                            set: { _ in viewModel.toggleAutoConvert(folder) }
                         ))
                         .toggleStyle(.switch)
                         .controlSize(.small)

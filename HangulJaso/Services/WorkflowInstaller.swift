@@ -7,8 +7,7 @@ final class WorkflowInstaller {
     }()
 
     private let workflowNames = [
-        "한글 파일명 NFC 변환",
-        "한글 파일명 상태 확인"
+        "한글 파일명 NFC 변환"
     ]
 
     var installedWorkflows: [String] {
@@ -43,9 +42,24 @@ final class WorkflowInstaller {
     }
 
     private func install(name: String) -> Bool {
-        guard let resourceURL = Bundle.main.resourceURL else { return false }
+        guard let resourceURL = Bundle.main.resourceURL else {
+            NSLog("WorkflowInstaller: no resourceURL")
+            return false
+        }
         let sourceURL = resourceURL.appendingPathComponent("\(name).workflow")
-        guard FileManager.default.fileExists(atPath: sourceURL.path) else { return false }
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            NSLog("WorkflowInstaller: source not found at %@", sourceURL.path)
+            // Try NFC-normalized path
+            let nfcSource = resourceURL.appendingPathComponent("\(name.precomposedStringWithCanonicalMapping).workflow")
+            if FileManager.default.fileExists(atPath: nfcSource.path) {
+                return installFrom(source: nfcSource, name: name)
+            }
+            return false
+        }
+        return installFrom(source: sourceURL, name: name)
+    }
+
+    private func installFrom(source: URL, name: String) -> Bool {
         let destURL = servicesDir.appendingPathComponent("\(name).workflow")
 
         let fm = FileManager.default
@@ -54,9 +68,11 @@ final class WorkflowInstaller {
         }
 
         do {
-            try fm.copyItem(at: sourceURL, to: destURL)
+            try fm.copyItem(at: source, to: destURL)
+            NSLog("WorkflowInstaller: installed %@", name)
             return true
         } catch {
+            NSLog("WorkflowInstaller: failed to copy %@ - %@", name, error.localizedDescription)
             return false
         }
     }

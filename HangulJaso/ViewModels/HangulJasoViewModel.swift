@@ -3,28 +3,6 @@ import SwiftUI
 import ServiceManagement
 import UserNotifications
 
-// MARK: - AppTab
-
-enum AppTab: String, CaseIterable {
-    case files, history, settings
-
-    var icon: String {
-        switch self {
-        case .files:    return "doc.on.doc"
-        case .history:  return "clock"
-        case .settings: return "gear"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .files:    return "파일"
-        case .history:  return "이력"
-        case .settings: return "설정"
-        }
-    }
-}
-
 // MARK: - HangulJasoViewModel
 
 @Observable
@@ -33,26 +11,11 @@ final class HangulJasoViewModel {
 
     // MARK: - State
 
-    var fileItems: [FileItem] = []
-    var history: [ConversionRecord] = []
     var watchedFolders: [WatchedFolder] = []
-    var isScanning = false
-    var currentTab: AppTab = .files
-    var showPreviewSheet = false
-    var lastConversionResults: [ConversionResult] = []
-
-    // MARK: - Computed
-
-    var totalCount: Int { fileItems.count }
-    var nfdCount: Int { fileItems.filter(\.isNFD).count }
-    var nfcCount: Int { fileItems.count - nfdCount }
-    var nfdItems: [FileItem] { fileItems.filter(\.isNFD) }
-    var hasNFDFiles: Bool { nfdCount > 0 }
 
     // MARK: - Services
 
     private let nfcService = NFCService()
-    private let historyService = HistoryService()
     private let monitorService = FileMonitorService()
     let workflowInstaller = WorkflowInstaller()
 
@@ -62,64 +25,12 @@ final class HangulJasoViewModel {
 
     init() {
         UserDefaults.standard.register(defaults: Constants.Defaults.registeredSettings)
-        history = historyService.getHistory()
         loadWatchedFolders()
+        if watchedFolders.isEmpty {
+            addDefaultWatchedFolders()
+        }
         setupURLHandler()
         setupMonitoring()
-    }
-
-    // MARK: - File Actions
-
-    func addFiles(urls: [URL]) {
-        isScanning = true
-        let newItems = nfcService.scan(urls: urls)
-        let existingPaths = Set(fileItems.map(\.url.path))
-        let unique = newItems.filter { !existingPaths.contains($0.url.path) }
-        fileItems.append(contentsOf: unique)
-        isScanning = false
-    }
-
-    func clearFiles() {
-        fileItems.removeAll()
-    }
-
-    func convertAll() {
-        let itemsToConvert = nfdItems
-        guard !itemsToConvert.isEmpty else { return }
-
-        let results = nfcService.convertAll(items: itemsToConvert)
-        lastConversionResults = results
-
-        let records = results.compactMap { result -> ConversionRecord? in
-            guard case .converted = result.status else { return nil }
-            return ConversionRecord(
-                originalName: result.fileItem.originalName,
-                convertedName: result.fileItem.normalizedName,
-                path: result.fileItem.parentURL.path
-            )
-        }
-        if !records.isEmpty {
-            historyService.addEntries(records)
-            history = historyService.getHistory()
-        }
-
-        // Refresh by re-scanning the unique parent directories of all current items
-        let parentURLs = Array(Set(fileItems.map(\.parentURL)))
-        fileItems.removeAll()
-        addFiles(urls: parentURLs)
-
-        sendConversionNotification(converted: records.count, total: itemsToConvert.count)
-    }
-
-    func undoRecord(_ record: ConversionRecord) {
-        guard nfcService.undo(record: record) else { return }
-        historyService.markUndone(id: record.id)
-        history = historyService.getHistory()
-    }
-
-    func clearHistory() {
-        historyService.clearHistory()
-        history = []
     }
 
     // MARK: - Watched Folders
@@ -150,6 +61,12 @@ final class HangulJasoViewModel {
         saveWatchedFolders()
     }
 
+    func toggleAutoConvert(_ folder: WatchedFolder) {
+        guard let index = watchedFolders.firstIndex(where: { $0.id == folder.id }) else { return }
+        watchedFolders[index].autoConvert.toggle()
+        saveWatchedFolders()
+    }
+
     // MARK: - Settings
 
     func updateLoginItem(enabled: Bool) {
@@ -157,21 +74,6 @@ final class HangulJasoViewModel {
             try? SMAppService.mainApp.register()
         } else {
             try? SMAppService.mainApp.unregister()
-        }
-    }
-
-    // MARK: - Open File Panel
-
-    func showOpenPanel() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.prompt = "추가"
-        panel.message = "변환할 파일이나 폴더를 선택하세요"
-
-        if panel.runModal() == .OK {
-            addFiles(urls: panel.urls)
         }
     }
 
@@ -203,10 +105,16 @@ final class HangulJasoViewModel {
 
         switch host {
         case "convert":
-            addFiles(urls: paths)
-            convertAll()
-        case "check":
-            addFiles(urls: paths)
+            // Delegate to AppDelegate's low-level readdir-based converter
+            // (Swift URL auto-normalizes NFD→NFC, so nfcService can't detect NFD)
+            for path in paths {
+                DistributedNotificationCenter.default().postNotificationName(
+                    Notification.Name("com.clover4282.hanguljaso.convertRequest"),
+                    object: path.path,
+                    userInfo: nil,
+                    deliverImmediately: true
+                )
+            }
         default:
             break
         }
@@ -214,43 +122,44 @@ final class HangulJasoViewModel {
 
     private func setupMonitoring() {
         monitorService.setChangeHandler { [weak self] changedPaths in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let urls = changedPaths.map { URL(fileURLWithPath: $0) }
-                let items = self.nfcService.scan(urls: urls)
-                let nfdItems = items.filter(\.isNFD)
-
-                guard !nfdItems.isEmpty else { return }
-
-                let autoConvertPaths = Set(self.watchedFolders.filter(\.autoConvert).map(\.path))
-                let shouldAutoConvert = nfdItems.contains { item in
-                    autoConvertPaths.contains { item.url.path.hasPrefix($0) }
+            guard let self else { return }
+            // Collect unique parent directories from changed paths
+            let dirs = Set(changedPaths.map { path -> String in
+                let url = URL(fileURLWithPath: path)
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                    return path
                 }
+                return url.deletingLastPathComponent().path
+            })
 
-                if shouldAutoConvert {
-                    let results = self.nfcService.convertAll(items: nfdItems)
-                    let records = results.compactMap { result -> ConversionRecord? in
-                        guard case .converted = result.status else { return nil }
-                        return ConversionRecord(
-                            originalName: result.fileItem.originalName,
-                            convertedName: result.fileItem.normalizedName,
-                            path: result.fileItem.parentURL.path
-                        )
-                    }
-                    if !records.isEmpty {
-                        self.historyService.addEntries(records)
-                        self.history = self.historyService.getHistory()
-                        self.sendConversionNotification(converted: records.count, total: nfdItems.count)
-                    }
-                } else if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
-                    self.sendDetectionNotification(count: nfdItems.count)
-                }
+            // Check autoConvert status for each directory
+            let autoConvertDirs = Set(self.watchedFolders.filter(\.autoConvert).map(\.path))
+
+            for dir in dirs {
+                let shouldAutoConvert = autoConvertDirs.contains(where: { dir.hasPrefix($0) })
+                NotificationCenter.default.post(
+                    name: Notification.Name("HangulJasoRescanDirectory"),
+                    object: dir,
+                    userInfo: ["autoConvert": shouldAutoConvert]
+                )
             }
         }
 
         for folder in watchedFolders where folder.enabled {
             monitorService.startWatching(path: folder.path)
         }
+    }
+
+    private func addDefaultWatchedFolders() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let defaults = ["Downloads", "Desktop", "Documents"]
+        for name in defaults {
+            let path = home + "/" + name
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            watchedFolders.append(WatchedFolder(path: path))
+        }
+        saveWatchedFolders()
     }
 
     private func loadWatchedFolders() {

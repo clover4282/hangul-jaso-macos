@@ -30,7 +30,7 @@ final class FileMonitorService {
             &context,
             paths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            1.0, // latency in seconds
+            2.0, // latency in seconds
             UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
         ) else { return }
 

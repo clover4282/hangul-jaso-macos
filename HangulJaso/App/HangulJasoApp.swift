@@ -7,8 +7,7 @@ struct HangulJasoApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarPopoverView()
-                .environment(viewModel)
+            MenuBarMenuView()
         } label: {
             let image: NSImage = {
                 guard let img = NSImage(named: "MenuBarIcon") else {
@@ -19,7 +18,7 @@ struct HangulJasoApp: App {
             }()
             Image(nsImage: image)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
 
         Window("한글 자소 정리", id: "main") {
             MainContentView()
@@ -27,5 +26,24 @@ struct HangulJasoApp: App {
                 .frame(minWidth: 600, minHeight: 450)
         }
         .windowResizability(.contentMinSize)
+    }
+}
+
+private struct MenuBarMenuView: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("설정 열기") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",", modifiers: .command)
+
+        Divider()
+
+        Button("종료") {
+            NSApp.terminate(nil)
+        }
+        .keyboardShortcut("q", modifiers: .command)
     }
 }

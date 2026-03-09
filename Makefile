@@ -5,7 +5,7 @@ BUILD_DIR = $(DERIVED_DIR)/Build/Products
 VERSION = $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" HangulJaso/Resources/Info.plist)
 BUILD_NUMBER = $(shell /usr/libexec/PlistBuddy -c "Print CFBundleVersion" HangulJaso/Resources/Info.plist)
 
-.PHONY: build release run kill rerun clean bump info help
+.PHONY: build release run kill rerun clean bump info help install
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -16,10 +16,15 @@ build: ## Build Debug configuration
 release: ## Build Release configuration
 	xcodebuild -scheme $(SCHEME) -configuration Release build | tail -3
 
-run: build ## Build and run the app
+install: build ## Build and install to /Applications
 	@pkill -x $(SCHEME) 2>/dev/null || true
 	@sleep 1
-	open "$(BUILD_DIR)/Debug/$(SCHEME).app"
+	@rm -rf /Applications/$(SCHEME).app
+	@cp -R "$(BUILD_DIR)/Debug/$(SCHEME).app" /Applications/
+	@echo "Installed to /Applications/$(SCHEME).app"
+
+run: install ## Build, install, and run the app
+	open /Applications/$(SCHEME).app
 
 kill: ## Kill running app
 	@pkill -x $(SCHEME) 2>/dev/null && echo "$(SCHEME) killed" || echo "$(SCHEME) not running"
@@ -27,7 +32,7 @@ kill: ## Kill running app
 rerun: ## Kill and rerun the app
 	@pkill -x $(SCHEME) 2>/dev/null || true
 	@sleep 1
-	open "$(BUILD_DIR)/Debug/$(SCHEME).app"
+	open /Applications/$(SCHEME).app
 
 clean: ## Clean build artifacts
 	xcodebuild -scheme $(SCHEME) clean | tail -3

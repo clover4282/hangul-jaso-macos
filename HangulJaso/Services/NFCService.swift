@@ -78,20 +78,4 @@ final class NFCService {
         items.map { convert(item: $0) }
     }
 
-    func undo(record: ConversionRecord) -> Bool {
-        let parentURL = URL(fileURLWithPath: record.path)
-        let currentURL = parentURL.appendingPathComponent(record.convertedName)
-        let originalURL = parentURL.appendingPathComponent(record.originalName)
-        let fm = FileManager.default
-
-        guard fm.fileExists(atPath: currentURL.path) else { return false }
-        guard !fm.fileExists(atPath: originalURL.path) else { return false }
-
-        do {
-            try fm.moveItem(at: currentURL, to: originalURL)
-            return true
-        } catch {
-            return false
-        }
-    }
 }
