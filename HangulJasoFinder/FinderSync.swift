@@ -22,6 +22,18 @@ class FinderSyncExtension: FIFinderSync {
         logger.notice("FinderSync init OK — watching \(realHome, privacy: .public)")
     }
 
+    // MARK: - Toolbar
+
+    override var toolbarItemName: String { "한글 NFC 변환" }
+
+    override var toolbarItemToolTip: String { "선택한 파일의 한글 파일명을 NFC로 변환" }
+
+    override var toolbarItemImage: NSImage {
+        let img = NSImage(systemSymbolName: "textformat.abc", accessibilityDescription: "한글 NFC 변환")
+        img?.isTemplate = true
+        return img ?? NSImage()
+    }
+
     // MARK: - Context Menu
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {

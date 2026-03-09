@@ -79,6 +79,7 @@ targets:
     entitlements:
       path: HangulJasoFinder/Resources/HangulJasoFinder.entitlements
       properties:
+        com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
           - 9P8DG7976Y.com.clover4282.hanguljaso
         com.apple.security.files.user-selected.read-write: true
