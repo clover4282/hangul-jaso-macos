@@ -6,6 +6,8 @@
 	<array>
 		<string>9P8DG7976Y.com.clover4282.hanguljaso</string>
 	</array>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 </dict>

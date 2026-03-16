@@ -48,12 +48,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             object: nil
         )
 
-        // Listen for convert requests from Quick Actions
+        // Listen for convert requests from Quick Actions (URL scheme → ViewModel → DistributedNotification)
         DistributedNotificationCenter.default().addObserver(
             self,
             selector: #selector(handleConvertRequest(_:)),
             name: Notification.Name("com.clover4282.hanguljaso.convertRequest"),
             object: nil
+        )
+
+        // Listen for convert requests from FinderSync extension (Darwin notification + App Group)
+        let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterAddObserver(darwinCenter, Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    delegate.handleFinderSyncConvert()
+                }
+            },
+            "com.clover4282.hanguljaso.finderConvert" as CFString, nil, .deliverImmediately
         )
 
         // Periodic full scan every 1 hour (개선 2)
@@ -130,35 +143,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// FinderSync에서 Darwin notification + App Group UserDefaults로 전달된 변환 요청 처리 (메인 스레드에서 호출)
+    private func handleFinderSyncConvert() {
+        guard let defaults = UserDefaults(suiteName: Constants.SharedDefaults.suiteName) else { return }
+        // 다른 프로세스에서 쓴 값을 확실히 읽기 위해 동기화
+        defaults.synchronize()
+        guard let pending = defaults.stringArray(forKey: Constants.SharedDefaults.pendingConvertPathsKey),
+              !pending.isEmpty else { return }
+        defaults.removeObject(forKey: Constants.SharedDefaults.pendingConvertPathsKey)
+        defaults.synchronize()
+
+        // __FINDER_SELECTION__: File Provider 폴더에서 AppleScript로 선택 항목 가져오기
+        var filePaths = pending
+        if filePaths == ["__FINDER_SELECTION__"] {
+            // AppleScript는 메인 스레드에서 실행 (NSAppleScript 스레드 안전성)
+            // TCC 다이얼로그 표시를 위해 일시적으로 regular 앱으로 전환
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+
+            let (paths, errorMsg) = finderSelectionViaAppleScript()
+
+            NSApp.setActivationPolicy(.accessory)
+
+            if paths.isEmpty {
+                sendNotification(title: "한글 자소 정리", body: errorMsg ?? "선택된 파일이 없습니다")
+                return
+            }
+            filePaths = paths
+        }
+
+        for filePath in filePaths {
+            processConvert(filePath: filePath)
+        }
+    }
+
+    /// AppleScript로 Finder 선택 항목의 POSIX 경로를 가져옴 (메인 스레드에서 호출)
+    /// 반환: (경로 배열, 에러 메시지 또는 nil)
+    private func finderSelectionViaAppleScript() -> ([String], String?) {
+        let source = """
+            tell application "Finder"
+                set sel to selection
+                if (count of sel) = 0 then
+                    return POSIX path of (target of front Finder window as alias)
+                end if
+                set paths to ""
+                repeat with f in sel
+                    set paths to paths & POSIX path of (f as alias) & linefeed
+                end repeat
+                return text 1 thru -2 of paths
+            end tell
+            """
+
+        let script = NSAppleScript(source: source)
+        var error: NSDictionary?
+        let result = script?.executeAndReturnError(&error)
+
+        if let error {
+            let errorNum = error[NSAppleScript.errorNumber] as? Int ?? 0
+            let errorMsg = error[NSAppleScript.errorMessage] as? String ?? "알 수 없는 오류"
+            NSLog("HangulJaso: AppleScript error %d: %@", errorNum, errorMsg)
+            if errorNum == -1743 {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
+                return ([], "Finder 자동화 권한이 필요합니다. 설정에서 허용해 주세요.")
+            }
+            return ([], "AppleScript 오류: \(errorMsg)")
+        }
+
+        guard let output = result?.stringValue, !output.isEmpty else {
+            return ([], nil)
+        }
+        return (output.components(separatedBy: "\n"), nil)
+    }
+
     @objc private func handleConvertRequest(_ notification: Notification) {
         guard let filePath = notification.object as? String else { return }
+        processConvert(filePath: filePath)
+    }
 
+    private func processConvert(filePath: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let url = URL(fileURLWithPath: filePath)
+            // 경로 끝의 / 제거 (AppleScript 디렉토리 경로 대응)
+            let cleanPath = filePath.hasSuffix("/") ? String(filePath.dropLast()) : filePath
+            let url = URL(fileURLWithPath: cleanPath)
             var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: filePath, isDirectory: &isDir)
+            let exists = FileManager.default.fileExists(atPath: cleanPath, isDirectory: &isDir)
+
+            guard exists else {
+                self.sendNotification(title: "한글 자소 정리", body: "경로를 찾을 수 없습니다")
+                return
+            }
 
             var totalConverted = 0
 
             if isDir.boolValue {
-                // Recursively convert all NFD files inside the folder (bottom-up)
-                totalConverted += self.convertDirectoryContents(atPath: filePath)
+                totalConverted += self.convertDirectoryContents(atPath: cleanPath)
             }
+            // 파일 또는 폴더 이름 자체가 NFD인 경우 변환
+            if self.convertSingleItem(url) { totalConverted += 1 }
 
-            // Convert the item itself
-            if self.convertSingleItem(url) {
-                totalConverted += 1
-            }
-
-            // Notify extension of result
-            DistributedNotificationCenter.default().postNotificationName(
-                Notification.Name("com.clover4282.hanguljaso.convertResult"),
-                object: totalConverted > 0 ? "ok:\(totalConverted)" : "fail",
-                userInfo: nil,
-                deliverImmediately: true
-            )
-
-            // User notification
             if totalConverted > 0 {
                 self.sendNotification(
                     title: "한글 자소 정리",
@@ -240,10 +322,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Convert a single item's name from NFD to NFC
     private func convertSingleItem(_ url: URL) -> Bool {
         let dirPath = url.deletingLastPathComponent().path
+        let nfcTarget = url.lastPathComponent
         guard let dir = opendir(dirPath) else { return false }
         defer { closedir(dir) }
-
-        let nfcTarget = url.lastPathComponent
 
         while let entry = readdir(dir) {
             let nameLen = Int(entry.pointee.d_namlen)

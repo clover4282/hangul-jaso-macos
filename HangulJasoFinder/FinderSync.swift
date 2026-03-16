@@ -70,24 +70,36 @@ class FinderSyncExtension: FIFinderSync {
     // MARK: - Actions
 
     @objc func convertToNFC(_ sender: AnyObject?) {
-        guard let items = FIFinderSyncController.default().selectedItemURLs(), !items.isEmpty else { return }
+        let items = FIFinderSyncController.default().selectedItemURLs()
+        let target = FIFinderSyncController.default().targetedURL()
 
-        for itemURL in items {
-            requestConversion(itemURL)
+        if let items, !items.isEmpty {
+            // 선택 항목을 App Group UserDefaults에 저장
+            savePaths(items.map(\.path))
+        } else if let target {
+            savePaths([target.path])
+        } else {
+            // CloudStorage(File Provider): selectedItemURLs/targetedURL 모두 nil
+            // → 메인 앱이 AppleScript로 Finder 선택 항목을 가져오도록 표시
+            savePaths(["__FINDER_SELECTION__"])
         }
 
-        logger.notice("convert request sent for \(items.count, privacy: .public) items")
+        // Darwin notification으로 메인 앱에 신호 전송 (샌드박스 제약 없음)
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(center, CFNotificationName("com.clover4282.hanguljaso.finderConvert" as CFString), nil, nil, true)
+
+        logger.notice("convert request sent via Darwin notification")
     }
 
-    // MARK: - Helpers
+    private static let suiteName = "9P8DG7976Y.com.clover4282.hanguljaso"
+    private static let pendingKey = "pendingConvertPaths"
 
-    /// Send conversion request to main app via DistributedNotificationCenter
-    private func requestConversion(_ url: URL) {
-        DistributedNotificationCenter.default().postNotificationName(
-            Notification.Name("com.clover4282.hanguljaso.convertRequest"),
-            object: url.path,
-            userInfo: nil,
-            deliverImmediately: true
-        )
+    private func savePaths(_ paths: [String]) {
+        guard let defaults = UserDefaults(suiteName: Self.suiteName) else { return }
+        // 기존 요청에 추가 (read-then-delete race 방지)
+        var existing = defaults.stringArray(forKey: Self.pendingKey) ?? []
+        existing.append(contentsOf: paths)
+        defaults.set(existing, forKey: Self.pendingKey)
+        defaults.synchronize()
     }
 }

@@ -31,5 +31,7 @@
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Finder에서 선택한 파일의 경로를 가져오기 위해 Apple Events 접근 권한이 필요합니다.</string>
 </dict>
 </plist>

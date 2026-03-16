@@ -99,16 +99,15 @@ final class HangulJasoViewModel {
 
     private func handleURL(_ url: URL) {
         guard let host = url.host else { return }
-        let paths = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?
-            .filter { $0.name == "p" }
-            .compactMap { $0.value }
-            .map { URL(fileURLWithPath: $0) } ?? []
-
-        guard !paths.isEmpty else { return }
 
         switch host {
         case "convert":
+            let paths = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .filter { $0.name == "p" }
+                .compactMap { $0.value }
+                .map { URL(fileURLWithPath: $0) } ?? []
+            guard !paths.isEmpty else { return }
             // Delegate to AppDelegate's low-level readdir-based converter
             // (Swift URL auto-normalizes NFD→NFC, so nfcService can't detect NFD)
             for path in paths {

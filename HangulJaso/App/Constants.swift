@@ -20,5 +20,7 @@ enum Constants {
         static let suiteName = "9P8DG7976Y.com.clover4282.hanguljaso"
         /// Key: directory path, Value: [String] array of NFC filenames that are NFD on disk
         static let nfdFilesKey = "nfdFiles"
+        /// FinderSync → main app 변환 요청 경로 목록
+        static let pendingConvertPathsKey = "pendingConvertPaths"
     }
 }

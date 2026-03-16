@@ -35,6 +35,7 @@ targets:
       path: HangulJaso/Resources/Info.plist
       properties:
         LSUIElement: true
+        NSAppleEventsUsageDescription: "Finder에서 선택한 파일의 경로를 가져오기 위해 Apple Events 접근 권한이 필요합니다."
         CFBundleURLTypes:
           - CFBundleURLSchemes:
               - hangul-jaso
@@ -45,6 +46,7 @@ targets:
         com.apple.security.application-groups:
           - 9P8DG7976Y.com.clover4282.hanguljaso
         com.apple.security.files.user-selected.read-write: true
+        com.apple.security.automation.apple-events: true
     dependencies:
       - target: HangulJasoFinder
         embed: true
