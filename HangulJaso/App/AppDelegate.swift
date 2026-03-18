@@ -98,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 if autoConvert {
                     let converted = self.convertDirectoryContents(atPath: dirPath, recursive: false)
                     if converted > 0 {
+                        // 변환 후 재스캔: 폴더 태그 갱신 (rename 없으므로 FSEvents 루프 안전)
+                        self.scanDirectory(dirPath, recursive: false)
+                        // 상위 폴더 태그 정리 (감시 루트까지)
+                        self.cleanParentFolderTags(from: dirPath)
+
                         NSLog("HangulJaso: auto-converted %d files in %@", converted, dirPath)
                         if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
                             self.sendNotification(
@@ -105,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                                 body: "\(converted)개 파일을 NFC로 자동 변환했습니다"
                             )
                         }
-                        // Start cooldown to prevent rename→FSEvents loop (개선 4: re-scan 제거)
+                        // Start cooldown to prevent rename→FSEvents loop
                         self.cooldownQueue.sync { self.recentlyConverted.insert(dirPath) }
                         self.cooldownQueue.asyncAfter(deadline: .now() + 5.0) {
                             self.recentlyConverted.remove(dirPath)
@@ -131,7 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if autoConvert {
                 let converted = self.convertDirectoryContents(atPath: dirPath)
                 if converted > 0 {
-                    // 개선 4: 변환 후 재스캔 제거
+                    // 변환 후 재스캔: 전체 트리 폴더 태그 갱신
+                    self.scanDirectory(dirPath, isRoot: true)
                     if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
                         self.sendNotification(
                             title: "한글 자소 정리",
@@ -237,6 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             if isDir.boolValue {
                 totalConverted += self.convertDirectoryContents(atPath: cleanPath)
+                // 변환 후 재스캔: 폴더 태그 + 잘못된 파일 태그 정리
+                self.scanDirectory(cleanPath, isRoot: true)
             }
             // 파일 또는 폴더 이름 자체가 NFD인 경우 변환
             if self.convertSingleItem(url) { totalConverted += 1 }
@@ -366,7 +374,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     let converted = self.convertDirectoryContents(atPath: folder.path)
                     if converted > 0 {
                         totalConverted += converted
-                        // 개선 4: 변환 후 재스캔 제거
+                        // 변환 후 재스캔: 전체 트리 폴더 태그 갱신
+                        self.scanDirectory(folder.path, isRoot: true)
                     }
                 }
             }
@@ -421,12 +430,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let nfc = rawName.precomposedStringWithCanonicalMapping
             let isNFD = !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars)
 
-            // 개선 1: NFD 파일에만 태그 부여, NFC 파일에 무조건 removeTag 하지 않음
+            // 개선 1: NFD 파일에만 태그 부여, NFC 파일은 잘못된 태그만 정리
             if isNFD {
                 let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
                 NSLog("HangulJaso: NFD found: %@ -> tag %@", rawName, fileURL.path)
                 addTag(tagName, to: fileURL)
                 foundNFD = true
+            } else {
+                // NFC 파일에 잘못된 NFD 태그가 남아있으면 정리
+                let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(rawName)
+                if hasTag(tagName, at: fileURL) {
+                    removeTag(tagName, from: fileURL)
+                }
             }
         }
 
@@ -487,6 +502,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         // Clear FinderInfo color label to prevent Finder from re-creating color tags
         clearFinderInfoColor(at: path)
+    }
+
+    /// 부모 폴더 체인을 감시 루트까지 올라가며 NFD 태그 정리
+    private func cleanParentFolderTags(from dirPath: String) {
+        let watchedRoots = Set(loadWatchedFolders().map(\.path))
+        let tagName = "NFD"
+        var current = dirPath
+        while true {
+            let parent = (current as NSString).deletingLastPathComponent
+            guard parent != current else { break }
+            // 감시 루트 자체는 정리하지 않음 (isRoot 폴더는 scanDirectory에서 태그 안 붙임)
+            if watchedRoots.contains(parent) { break }
+            let parentURL = URL(fileURLWithPath: parent)
+            guard hasTag(tagName, at: parentURL) else { break }
+            if directoryStillHasNFD(parent) { break }
+            removeTag(tagName, from: parentURL)
+            current = parent
+        }
+    }
+
+    /// 디렉토리에 NFD 항목이 아직 남아있는지 확인 (직접 자식 이름 + 하위 폴더 NFD 태그)
+    private func directoryStillHasNFD(_ dirPath: String) -> Bool {
+        guard let dir = opendir(dirPath) else { return false }
+        defer { closedir(dir) }
+
+        let tagName = "NFD"
+        while let entry = readdir(dir) {
+            let nameLen = Int(entry.pointee.d_namlen)
+            let rawName: String = withUnsafePointer(to: entry.pointee.d_name) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: nameLen) { buf in
+                    String(bytes: UnsafeBufferPointer(start: buf, count: nameLen), encoding: .utf8) ?? ""
+                }
+            }
+            guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
+
+            // 직접 자식 이름이 NFD인지 확인
+            let nfc = rawName.precomposedStringWithCanonicalMapping
+            if !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars) {
+                return true
+            }
+
+            // 하위 폴더가 NFD 태그를 갖고 있는지 확인 (깊은 NFD의 프록시)
+            if entry.pointee.d_type == DT_DIR {
+                let subURL = URL(fileURLWithPath: dirPath).appendingPathComponent(rawName)
+                if hasTag(tagName, at: subURL) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// xattr에서 특정 태그 존재 여부를 빠르게 확인
+    private func hasTag(_ tag: String, at url: URL) -> Bool {
+        let key = "com.apple.metadata:_kMDItemUserTags"
+        let path = url.path
+        let size = getxattr(path, key, nil, 0, 0, 0)
+        guard size > 0 else { return false }
+        var data = Data(count: size)
+        let read = data.withUnsafeMutableBytes { ptr in
+            getxattr(path, key, ptr.baseAddress, size, 0, 0)
+        }
+        guard read > 0,
+              let tags = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String] else {
+            return false
+        }
+        return tags.contains { $0.hasPrefix(tag) }
     }
 
     private func removeTag(_ tag: String, from url: URL) {
