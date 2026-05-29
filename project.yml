@@ -26,11 +26,14 @@ targets:
       - script: |
           mkdir -p "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
           cp -R "${SRCROOT}/Workflows/한글 파일명 NFC 변환.workflow" "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/"
+          cp -R "${SRCROOT}/Workflows/한글 파일명 NFD 검사.workflow" "${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/"
         name: Copy Workflows
         inputFiles:
           - $(SRCROOT)/Workflows/한글 파일명 NFC 변환.workflow
+          - $(SRCROOT)/Workflows/한글 파일명 NFD 검사.workflow
         outputFiles:
           - $(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/한글 파일명 NFC 변환.workflow
+          - $(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/한글 파일명 NFD 검사.workflow
     info:
       path: HangulJaso/Resources/Info.plist
       properties:

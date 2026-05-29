@@ -4,18 +4,15 @@ struct WatchedFolder: Codable, Identifiable {
     let id: UUID
     let path: String
     var enabled: Bool
-    var autoConvert: Bool
 
     init(
         id: UUID = UUID(),
         path: String,
-        enabled: Bool = true,
-        autoConvert: Bool = false
+        enabled: Bool = true
     ) {
         self.id = id
         self.path = path
         self.enabled = enabled
-        self.autoConvert = autoConvert
     }
 
     var url: URL { URL(fileURLWithPath: path) }

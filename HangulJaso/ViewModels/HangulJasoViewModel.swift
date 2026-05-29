@@ -40,11 +40,10 @@ final class HangulJasoViewModel {
         saveWatchedFolders()
         if folder.enabled {
             monitorService.startWatching(path: folder.path)
-            // 추가 즉시 전체 스캔+변환 요청
+            // 추가 즉시 전체 스캔 요청 (NFD 태그 부착)
             NotificationCenter.default.post(
                 name: Notification.Name("HangulJasoFullScanDirectory"),
-                object: folder.path,
-                userInfo: ["autoConvert": folder.autoConvert]
+                object: folder.path
             )
         }
     }
@@ -63,12 +62,6 @@ final class HangulJasoViewModel {
         } else {
             monitorService.stopWatching(path: folder.path)
         }
-        saveWatchedFolders()
-    }
-
-    func toggleAutoConvert(_ folder: WatchedFolder) {
-        guard let index = watchedFolders.firstIndex(where: { $0.id == folder.id }) else { return }
-        watchedFolders[index].autoConvert.toggle()
         saveWatchedFolders()
     }
 
@@ -102,30 +95,34 @@ final class HangulJasoViewModel {
 
         switch host {
         case "convert":
-            let paths = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?
-                .filter { $0.name == "p" }
-                .compactMap { $0.value }
-                .map { URL(fileURLWithPath: $0) } ?? []
-            guard !paths.isEmpty else { return }
-            // Delegate to AppDelegate's low-level readdir-based converter
-            // (Swift URL auto-normalizes NFD→NFC, so nfcService can't detect NFD)
-            for path in paths {
-                DistributedNotificationCenter.default().postNotificationName(
-                    Notification.Name("com.clover4282.hanguljaso.convertRequest"),
-                    object: path.path,
-                    userInfo: nil,
-                    deliverImmediately: true
-                )
-            }
+            postPathRequest(url: url, notification: "com.clover4282.hanguljaso.convertRequest")
+        case "scan":
+            postPathRequest(url: url, notification: "com.clover4282.hanguljaso.scanRequest")
         default:
             break
         }
     }
 
+    /// URL의 p 쿼리에서 경로들을 추출해 개행으로 묶어 AppDelegate에 distributed notification 전달 → 요약 알림 1개
+    /// (Swift URL이 NFD→NFC 자동 정규화하므로 저수준 readdir 변환/검사는 AppDelegate에 위임)
+    private func postPathRequest(url: URL, notification: String) {
+        let paths = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .filter { $0.name == "p" }
+            .compactMap { $0.value }
+            .map { URL(fileURLWithPath: $0) } ?? []
+        guard !paths.isEmpty else { return }
+        let joined = paths.map(\.path).joined(separator: "\n")
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name(notification),
+            object: joined,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+
     private func setupMonitoring() {
-        monitorService.setChangeHandler { [weak self] changedPaths in
-            guard let self else { return }
+        monitorService.setChangeHandler { changedPaths in
             // Collect unique parent directories from changed paths
             let dirs = Set(changedPaths.map { path -> String in
                 let url = URL(fileURLWithPath: path)
@@ -136,15 +133,10 @@ final class HangulJasoViewModel {
                 return url.deletingLastPathComponent().path
             })
 
-            // Check autoConvert status for each directory
-            let autoConvertDirs = Set(self.watchedFolders.filter(\.autoConvert).map(\.path))
-
             for dir in dirs {
-                let shouldAutoConvert = autoConvertDirs.contains(where: { dir.hasPrefix($0) })
                 NotificationCenter.default.post(
                     name: Notification.Name("HangulJasoRescanDirectory"),
-                    object: dir,
-                    userInfo: ["autoConvert": shouldAutoConvert]
+                    object: dir
                 )
             }
         }

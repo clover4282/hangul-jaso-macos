@@ -11,10 +11,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var pendingRescans: [String: DispatchWorkItem] = [:]
     private let debounceQueue = DispatchQueue(label: "com.clover4282.hanguljaso.debounce")
 
-    /// Cooldown: recently converted directories (to prevent rename→FSEvents loop)
-    private var recentlyConverted: Set<String> = []
-    private let cooldownQueue = DispatchQueue(label: "com.clover4282.hanguljaso.cooldown")
-
     /// Periodic full scan timer
     private var periodicScanTimer: Timer?
 
@@ -56,6 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             object: nil
         )
 
+        // Listen for scan requests from Quick Actions (URL scheme → ViewModel → DistributedNotification)
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleScanRequest(_:)),
+            name: Notification.Name("com.clover4282.hanguljaso.scanRequest"),
+            object: nil
+        )
+
         // Listen for convert requests from FinderSync extension (Darwin notification + App Group)
         let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterAddObserver(darwinCenter, Unmanaged.passUnretained(self).toOpaque(),
@@ -69,6 +73,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             "com.clover4282.hanguljaso.finderConvert" as CFString, nil, .deliverImmediately
         )
 
+        // Listen for scan requests from FinderSync extension (Darwin notification + App Group)
+        CFNotificationCenterAddObserver(darwinCenter, Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    delegate.handleFinderSyncScan()
+                }
+            },
+            "com.clover4282.hanguljaso.finderScan" as CFString, nil, .deliverImmediately
+        )
+
         // Periodic full scan every 1 hour (개선 2)
         periodicScanTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             self?.scanAndShareNFDFiles()
@@ -77,15 +93,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func handleRescanDirectory(_ notification: Notification) {
         guard let dirPath = notification.object as? String else { return }
-        let autoConvert = notification.userInfo?["autoConvert"] as? Bool ?? false
-
-        // Skip if this directory was recently converted (cooldown)
-        var inCooldown = false
-        cooldownQueue.sync { inCooldown = recentlyConverted.contains(dirPath) }
-        if inCooldown {
-            NSLog("HangulJaso: skipping rescan (cooldown): %@", dirPath)
-            return
-        }
 
         // Debounce: cancel pending rescan for same directory, schedule new one in 2s
         debounceQueue.sync {
@@ -93,30 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 // FSEvents-triggered scan: non-recursive (only the changed directory)
-                self.scanDirectory(dirPath, recursive: false)
+                // NFD 파일에 태그만 부착 — 변환(rename)은 수동(Finder 우클릭/툴바)으로만 수행
+                let found = self.scanDirectory(dirPath, recursive: false)
 
-                if autoConvert {
-                    let converted = self.convertDirectoryContents(atPath: dirPath, recursive: false)
-                    if converted > 0 {
-                        // 변환 후 재스캔: 폴더 태그 갱신 (rename 없으므로 FSEvents 루프 안전)
-                        self.scanDirectory(dirPath, recursive: false)
-                        // 상위 폴더 태그 정리 (감시 루트까지)
-                        self.cleanParentFolderTags(from: dirPath)
-
-                        NSLog("HangulJaso: auto-converted %d files in %@", converted, dirPath)
-                        if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
-                            self.sendNotification(
-                                title: "한글 자소 정리",
-                                body: "\(converted)개 파일을 NFC로 자동 변환했습니다"
-                            )
-                        }
-                        // Start cooldown to prevent rename→FSEvents loop
-                        self.cooldownQueue.sync { self.recentlyConverted.insert(dirPath) }
-                        self.cooldownQueue.asyncAfter(deadline: .now() + 5.0) {
-                            self.recentlyConverted.remove(dirPath)
-                        }
-                    }
-                }
+                // scanDirectory는 폴더 자체 태그를 부모에게 맡기므로, 이 폴더 자체 태그를 직접 갱신
+                self.reevaluateOwnTag(path: dirPath, contentFound: found)
 
                 self.debounceQueue.sync { self.pendingRescans.removeValue(forKey: dirPath) }
             }
@@ -127,60 +115,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func handleFullScanDirectory(_ notification: Notification) {
         guard let dirPath = notification.object as? String else { return }
-        let autoConvert = notification.userInfo?["autoConvert"] as? Bool ?? false
 
         DispatchQueue.global(qos: .userInitiated).async {
             NSLog("HangulJaso: full scan requested for %@", dirPath)
-            self.scanDirectory(dirPath, isRoot: true)
-
-            if autoConvert {
-                let converted = self.convertDirectoryContents(atPath: dirPath)
-                if converted > 0 {
-                    // 변환 후 재스캔: 전체 트리 폴더 태그 갱신
-                    self.scanDirectory(dirPath, isRoot: true)
-                    if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
-                        self.sendNotification(
-                            title: "한글 자소 정리",
-                            body: "\(converted)개 파일을 NFC로 자동 변환했습니다"
-                        )
-                    }
-                }
-            }
+            self.scanDirectory(dirPath)
         }
     }
 
     /// FinderSync에서 Darwin notification + App Group UserDefaults로 전달된 변환 요청 처리 (메인 스레드에서 호출)
     private func handleFinderSyncConvert() {
-        guard let defaults = UserDefaults(suiteName: Constants.SharedDefaults.suiteName) else { return }
+        NSLog("HangulJaso: handleFinderSyncConvert called")
+        guard let filePaths = resolvePendingPaths(key: Constants.SharedDefaults.pendingConvertPathsKey) else { return }
+        processConvert(filePaths: filePaths)
+    }
+
+    /// FinderSync에서 Darwin notification + App Group UserDefaults로 전달된 검사 요청 처리 (메인 스레드에서 호출)
+    private func handleFinderSyncScan() {
+        NSLog("HangulJaso: handleFinderSyncScan called")
+        guard let filePaths = resolvePendingPaths(key: Constants.SharedDefaults.pendingScanPathsKey) else { return }
+        processScan(filePaths: filePaths)
+    }
+
+    /// App Group에서 pending 경로를 읽고, __FINDER_SELECTION__이면 AppleScript로 Finder 선택 항목을 해석
+    /// 반환: 해석된 경로 배열 (없거나 오류면 nil — 알림은 내부에서 처리)
+    private func resolvePendingPaths(key: String) -> [String]? {
+        guard let defaults = UserDefaults(suiteName: Constants.SharedDefaults.suiteName) else { return nil }
         // 다른 프로세스에서 쓴 값을 확실히 읽기 위해 동기화
         defaults.synchronize()
-        guard let pending = defaults.stringArray(forKey: Constants.SharedDefaults.pendingConvertPathsKey),
-              !pending.isEmpty else { return }
-        defaults.removeObject(forKey: Constants.SharedDefaults.pendingConvertPathsKey)
+        guard let pending = defaults.stringArray(forKey: key), !pending.isEmpty else { return nil }
+        defaults.removeObject(forKey: key)
         defaults.synchronize()
 
         // __FINDER_SELECTION__: File Provider 폴더에서 AppleScript로 선택 항목 가져오기
-        var filePaths = pending
-        if filePaths == ["__FINDER_SELECTION__"] {
-            // AppleScript는 메인 스레드에서 실행 (NSAppleScript 스레드 안전성)
-            // TCC 다이얼로그 표시를 위해 일시적으로 regular 앱으로 전환
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
+        guard pending == ["__FINDER_SELECTION__"] else { return pending }
 
-            let (paths, errorMsg) = finderSelectionViaAppleScript()
+        // AppleScript는 메인 스레드에서 실행 (NSAppleScript 스레드 안전성)
+        // TCC 다이얼로그 표시를 위해 일시적으로 regular 앱으로 전환
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
 
-            NSApp.setActivationPolicy(.accessory)
+        let (paths, errorMsg) = finderSelectionViaAppleScript()
 
-            if paths.isEmpty {
-                sendNotification(title: "한글 자소 정리", body: errorMsg ?? "선택된 파일이 없습니다")
-                return
-            }
-            filePaths = paths
+        NSApp.setActivationPolicy(.accessory)
+
+        if paths.isEmpty {
+            sendNotification(title: "한글 자소 정리", body: errorMsg ?? "선택된 파일이 없습니다", fallbackToAlert: true)
+            return nil
         }
-
-        for filePath in filePaths {
-            processConvert(filePath: filePath)
-        }
+        return paths
     }
 
     /// AppleScript로 Finder 선택 항목의 POSIX 경로를 가져옴 (메인 스레드에서 호출)
@@ -222,45 +204,166 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @objc private func handleConvertRequest(_ notification: Notification) {
-        guard let filePath = notification.object as? String else { return }
-        processConvert(filePath: filePath)
+        guard let raw = notification.object as? String else { return }
+        // 여러 경로는 개행으로 join되어 전달됨 (ViewModel.handleURL)
+        let filePaths = raw.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard !filePaths.isEmpty else { return }
+        processConvert(filePaths: filePaths)
     }
 
-    private func processConvert(filePath: String) {
+    @objc private func handleScanRequest(_ notification: Notification) {
+        guard let raw = notification.object as? String else { return }
+        let filePaths = raw.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard !filePaths.isEmpty else { return }
+        processScan(filePaths: filePaths)
+    }
+
+    /// 여러 경로를 한 번에 변환하고 요약 알림 1개만 표시
+    private func processConvert(filePaths: [String]) {
         DispatchQueue.global(qos: .userInitiated).async {
-            // 경로 끝의 / 제거 (AppleScript 디렉토리 경로 대응)
-            let cleanPath = filePath.hasSuffix("/") ? String(filePath.dropLast()) : filePath
-            let url = URL(fileURLWithPath: cleanPath)
-            var isDir: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: cleanPath, isDirectory: &isDir)
-
-            guard exists else {
-                self.sendNotification(title: "한글 자소 정리", body: "경로를 찾을 수 없습니다")
-                return
-            }
-
             var totalConverted = 0
-
-            if isDir.boolValue {
-                totalConverted += self.convertDirectoryContents(atPath: cleanPath)
-                // 변환 후 재스캔: 폴더 태그 + 잘못된 파일 태그 정리
-                self.scanDirectory(cleanPath, isRoot: true)
+            var notFound = 0
+            for path in filePaths {
+                if let converted = self.convertPath(path) {
+                    totalConverted += converted
+                } else {
+                    notFound += 1
+                }
             }
-            // 파일 또는 폴더 이름 자체가 NFD인 경우 변환
-            if self.convertSingleItem(url) { totalConverted += 1 }
 
+            // 변환이 있었으면 영향받은 감시 루트를 재귀 재스캔하여
+            // 변환된 파일의 상위 폴더 태그까지 정확히 갱신 (하위에 NFD 없으면 태그 해제)
             if totalConverted > 0 {
-                self.sendNotification(
-                    title: "한글 자소 정리",
-                    body: "\(totalConverted)개 파일을 NFC로 변환했습니다"
-                )
+                let roots = self.loadWatchedFolders().map(\.path)
+                var affectedRoots = Set<String>()
+                for path in filePaths {
+                    let clean = path.hasSuffix("/") ? String(path.dropLast()) : path
+                    for root in roots where clean == root || clean.hasPrefix(root + "/") {
+                        affectedRoots.insert(root)
+                    }
+                }
+                for root in affectedRoots {
+                    self.scanDirectory(root)
+                }
+            }
+
+            let body: String
+            if totalConverted > 0 {
+                body = "\(totalConverted)개 파일을 NFC로 변환했습니다"
+            } else if notFound == filePaths.count {
+                body = "경로를 찾을 수 없습니다"
             } else {
-                self.sendNotification(
-                    title: "한글 자소 정리",
-                    body: "변환할 NFD 파일이 없습니다"
-                )
+                body = "변환할 NFD 파일이 없습니다"
+            }
+            self.sendNotification(title: "한글 자소 정리", body: body, fallbackToAlert: true)
+        }
+    }
+
+    /// 단일 경로(파일/폴더)를 변환. 반환: 변환된 파일 개수, 경로가 없으면 nil (알림 없음)
+    private func convertPath(_ filePath: String) -> Int? {
+        NSLog("HangulJaso: convertPath called for: %@", filePath)
+        // 경로 끝의 / 제거 (AppleScript 디렉토리 경로 대응)
+        let cleanPath = filePath.hasSuffix("/") ? String(filePath.dropLast()) : filePath
+        let url = URL(fileURLWithPath: cleanPath)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: cleanPath, isDirectory: &isDir) else {
+            return nil
+        }
+
+        var totalConverted = 0
+        if isDir.boolValue {
+            totalConverted += convertDirectoryContents(atPath: cleanPath)
+            // 변환 후 재스캔: 폴더 태그 + 잘못된 파일 태그 정리
+            scanDirectory(cleanPath)
+        }
+        // 파일 또는 폴더 이름 자체가 NFD인 경우 변환
+        if convertSingleItem(url) { totalConverted += 1 }
+        return totalConverted
+    }
+
+    /// 여러 경로를 검사해 NFD에 태그를 부착/정리하고 요약 알림 1개만 표시 (변환 없음)
+    private func processScan(filePaths: [String]) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var foundAny = false
+            var scanned = 0
+            for path in filePaths {
+                if let found = self.scanPath(path) {
+                    scanned += 1
+                    if found { foundAny = true }
+                }
+            }
+
+            let body: String
+            if scanned == 0 {
+                body = "경로를 찾을 수 없습니다"
+            } else if foundAny {
+                body = "NFD 파일을 발견해 태그로 표시했습니다"
+            } else {
+                body = "NFD 파일이 없습니다"
+            }
+            self.sendNotification(title: "한글 자소 정리", body: body, fallbackToAlert: true)
+        }
+    }
+
+    /// 단일 경로 검사. 반환: NFD 발견 여부, 경로가 없으면 nil
+    private func scanPath(_ filePath: String) -> Bool? {
+        let cleanPath = filePath.hasSuffix("/") ? String(filePath.dropLast()) : filePath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: cleanPath, isDirectory: &isDir) else { return nil }
+        guard isDir.boolValue else { return scanSingleFile(cleanPath) }
+
+        let found = scanDirectory(cleanPath)
+        // scanDirectory는 자식만 처리하므로 스캔한 폴더 자신의 태그를 재평가한다.
+        reevaluateOwnTag(path: cleanPath, contentFound: found)
+        return found
+    }
+
+    /// 스캔/재스캔한 폴더 **자신**의 NFD 태그를 재평가한다.
+    /// scanDirectory는 폴더 자체 태그를 부모에게 맡기므로, 직속 스캔 대상은 여기서 직접 갱신한다.
+    /// 감시 루트(Downloads 등)는 자체 태깅하지 않되, 과거에 잘못 붙은 stale 태그는 정리한다.
+    private func reevaluateOwnTag(path: String, contentFound: Bool) {
+        let url = URL(fileURLWithPath: path)
+        // watched_folders.json 경로가 NFD로 저장돼 있어도 Swift String ==는 정규화 동등성으로 매칭됨
+        let isWatchedRoot = loadWatchedFolders().contains { $0.path == path }
+        let name = (path as NSString).lastPathComponent
+        let nameIsNFD = !name.unicodeScalars.elementsEqual(name.precomposedStringWithCanonicalMapping.unicodeScalars)
+        if !isWatchedRoot && (contentFound || nameIsNFD) {
+            addTag("NFD", to: url)
+        } else if hasTag("NFD", at: url) {
+            removeTag("NFD", from: url)
+        }
+    }
+
+    /// 단일 파일 이름이 NFD인지 검사해 태그 부착/정리. 반환: NFD 여부
+    private func scanSingleFile(_ filePath: String) -> Bool {
+        let url = URL(fileURLWithPath: filePath)
+        let dirPath = url.deletingLastPathComponent().path
+        let nfcTarget = url.lastPathComponent
+        if Self.shouldSkip(nfcTarget) { return false }
+        guard let dir = opendir(dirPath) else { return false }
+        defer { closedir(dir) }
+
+        let tagName = "NFD"
+        while let entry = readdir(dir) {
+            let nameLen = Int(entry.pointee.d_namlen)
+            let rawName: String = withUnsafePointer(to: entry.pointee.d_name) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: nameLen) { buf in
+                    String(bytes: UnsafeBufferPointer(start: buf, count: nameLen), encoding: .utf8) ?? ""
+                }
+            }
+            let nfc = rawName.precomposedStringWithCanonicalMapping
+            guard nfc == nfcTarget else { continue }
+
+            let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
+            if !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars) {
+                addTag(tagName, to: fileURL)
+                return true
+            } else {
+                if hasTag(tagName, at: fileURL) { removeTag(tagName, from: fileURL) }
+                return false
             }
         }
+        return false
     }
 
     /// Convert NFD entries inside a directory, optionally recursing into subdirectories (bottom-up)
@@ -283,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
             }
             guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
-            if Self.shouldSkipAutoConvert(rawName) { continue }
+            if Self.shouldSkip(rawName) { continue }
 
             let fullPath = dirPath + "/" + rawName
             let isDirectory = entry.pointee.d_type == DT_DIR
@@ -316,8 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return converted
     }
 
-    /// Check if a file/folder should be skipped during auto-conversion
-    private static func shouldSkipAutoConvert(_ name: String) -> Bool {
+    /// 숨김·임시 파일은 NFD 검사/변환에서 제외 (~$ Office 잠금파일, dotfile, .tmp/.lock/.lck/.swp)
+    private static func shouldSkip(_ name: String) -> Bool {
         // Hidden files/folders (e.g. .git, .DS_Store)
         name.hasPrefix(".") ||
         // Office temp files (~$file.docx)
@@ -331,6 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func convertSingleItem(_ url: URL) -> Bool {
         let dirPath = url.deletingLastPathComponent().path
         let nfcTarget = url.lastPathComponent
+        if Self.shouldSkip(nfcTarget) { return false }
         guard let dir = opendir(dirPath) else { return false }
         defer { closedir(dir) }
 
@@ -367,26 +471,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             defer { self.isScanning = false }
             let folders = self.loadWatchedFolders()
             NSLog("HangulJaso: scanning %d watched folders", folders.count)
-            var totalConverted = 0
             for folder in folders {
-                self.scanDirectory(folder.path, isRoot: true)
-                if folder.autoConvert {
-                    let converted = self.convertDirectoryContents(atPath: folder.path)
-                    if converted > 0 {
-                        totalConverted += converted
-                        // 변환 후 재스캔: 전체 트리 폴더 태그 갱신
-                        self.scanDirectory(folder.path, isRoot: true)
-                    }
-                }
-            }
-            if totalConverted > 0 {
-                NSLog("HangulJaso: startup auto-converted %d files", totalConverted)
-                if UserDefaults.standard.bool(forKey: Constants.UserDefaultsKeys.notifyOnAutoConvert) {
-                    self.sendNotification(
-                        title: "한글 자소 정리",
-                        body: "\(totalConverted)개 파일을 NFC로 자동 변환했습니다"
-                    )
-                }
+                // NFD 파일에 태그만 부착 — 변환(rename)은 수동으로만 수행
+                self.scanDirectory(folder.path)
             }
             NSLog("HangulJaso: scan complete")
         }
@@ -404,13 +491,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     /// Scans a directory for NFD filenames, tags them, and optionally recurses into subdirectories.
     /// Returns `true` if any NFD entry was found in this directory or its children.
+    /// 디렉토리를 스캔해 NFD 항목에 태그를 부착/정리한다.
+    /// 폴더 자체 태그는 결정하지 않고 **부모가** (자식 이름 NFD ‖ 자식 내용 NFD)로 결정한다 —
+    /// "이름만 NFD인 폴더"를 부모가 붙였다가 자식 재귀가 떼는 깜빡임을 막기 위함.
+    /// 반환: 이 디렉토리(직속 파일 + 하위 폴더 포함)에 NFD가 있는지 여부.
     @discardableResult
-    private func scanDirectory(_ dirPath: String, isRoot: Bool = false, recursive: Bool = true) -> Bool {
+    private func scanDirectory(_ dirPath: String, recursive: Bool = true) -> Bool {
         guard let dir = opendir(dirPath) else { return false }
         defer { closedir(dir) }
 
         let tagName = "NFD"
-        var subdirs: [String] = []
+        // 하위 폴더: (경로, 폴더 이름이 NFD인지)
+        var subdirs: [(path: String, nameIsNFD: Bool)] = []
         var foundNFD = false
 
         while let entry = readdir(dir) {
@@ -422,18 +514,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
 
-            let isDirectory = entry.pointee.d_type == DT_DIR
-            if isDirectory {
-                subdirs.append(dirPath + "/" + rawName)
+            // 숨김·임시 파일은 검사 제외. 과거에 잘못 붙은 태그가 있으면 정리(디렉토리는 건드리지 않음)
+            if Self.shouldSkip(rawName) {
+                if entry.pointee.d_type != DT_DIR {
+                    let u = URL(fileURLWithPath: dirPath).appendingPathComponent(rawName)
+                    if hasTag(tagName, at: u) { removeTag(tagName, from: u) }
+                }
+                continue
             }
 
             let nfc = rawName.precomposedStringWithCanonicalMapping
             let isNFD = !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars)
+            let isDirectory = entry.pointee.d_type == DT_DIR
 
-            // 개선 1: NFD 파일에만 태그 부여, NFC 파일은 잘못된 태그만 정리
-            if isNFD {
+            if isDirectory {
+                // 폴더 태그는 재귀 이후 (이름 NFD ‖ 내용 NFD)로 일괄 결정
+                subdirs.append((dirPath + "/" + rawName, isNFD))
+                if isNFD { foundNFD = true }
+            } else if isNFD {
+                // NFD 파일: 이름 기준 태그 부여
                 let fileURL = URL(fileURLWithPath: dirPath).appendingPathComponent(nfc)
-                NSLog("HangulJaso: NFD found: %@ -> tag %@", rawName, fileURL.path)
                 addTag(tagName, to: fileURL)
                 foundNFD = true
             } else {
@@ -445,22 +545,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        // Recurse into subdirectories (only if recursive mode)
-        if recursive {
-            for subdir in subdirs {
-                if scanDirectory(subdir) {
-                    foundNFD = true
-                }
-            }
-        }
-
-        // Tag or untag the folder itself based on whether it contains NFD entries
-        let folderURL = URL(fileURLWithPath: dirPath)
-        if !isRoot {
-            if foundNFD {
-                addTag(tagName, to: folderURL)
-            } else {
-                removeTag(tagName, from: folderURL)
+        // 하위 폴더 태그 결정: 폴더 이름이 NFD이거나, (재귀 시) 내용에 NFD가 있으면 태그
+        for sub in subdirs {
+            let contentHasNFD = recursive
+                ? scanDirectory(sub.path)
+                : hasTag(tagName, at: URL(fileURLWithPath: sub.path)) // 비재귀: 기존 태그를 내용 프록시로 유지
+            let subURL = URL(fileURLWithPath: sub.path)
+            if sub.nameIsNFD || contentHasNFD {
+                addTag(tagName, to: subURL)
+                foundNFD = true
+            } else if hasTag(tagName, at: subURL) {
+                removeTag(tagName, from: subURL)
             }
         }
 
@@ -504,56 +599,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         clearFinderInfoColor(at: path)
     }
 
-    /// 부모 폴더 체인을 감시 루트까지 올라가며 NFD 태그 정리
-    private func cleanParentFolderTags(from dirPath: String) {
-        let watchedRoots = Set(loadWatchedFolders().map(\.path))
-        let tagName = "NFD"
-        var current = dirPath
-        while true {
-            let parent = (current as NSString).deletingLastPathComponent
-            guard parent != current else { break }
-            // 감시 루트 자체는 정리하지 않음 (isRoot 폴더는 scanDirectory에서 태그 안 붙임)
-            if watchedRoots.contains(parent) { break }
-            let parentURL = URL(fileURLWithPath: parent)
-            guard hasTag(tagName, at: parentURL) else { break }
-            if directoryStillHasNFD(parent) { break }
-            removeTag(tagName, from: parentURL)
-            current = parent
-        }
-    }
-
-    /// 디렉토리에 NFD 항목이 아직 남아있는지 확인 (직접 자식 이름 + 하위 폴더 NFD 태그)
-    private func directoryStillHasNFD(_ dirPath: String) -> Bool {
-        guard let dir = opendir(dirPath) else { return false }
-        defer { closedir(dir) }
-
-        let tagName = "NFD"
-        while let entry = readdir(dir) {
-            let nameLen = Int(entry.pointee.d_namlen)
-            let rawName: String = withUnsafePointer(to: entry.pointee.d_name) { ptr in
-                ptr.withMemoryRebound(to: UInt8.self, capacity: nameLen) { buf in
-                    String(bytes: UnsafeBufferPointer(start: buf, count: nameLen), encoding: .utf8) ?? ""
-                }
-            }
-            guard !rawName.isEmpty && rawName != "." && rawName != ".." else { continue }
-
-            // 직접 자식 이름이 NFD인지 확인
-            let nfc = rawName.precomposedStringWithCanonicalMapping
-            if !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars) {
-                return true
-            }
-
-            // 하위 폴더가 NFD 태그를 갖고 있는지 확인 (깊은 NFD의 프록시)
-            if entry.pointee.d_type == DT_DIR {
-                let subURL = URL(fileURLWithPath: dirPath).appendingPathComponent(rawName)
-                if hasTag(tagName, at: subURL) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
     /// xattr에서 특정 태그 존재 여부를 빠르게 확인
     private func hasTag(_ tag: String, at url: URL) -> Bool {
         let key = "com.apple.metadata:_kMDItemUserTags"
@@ -589,7 +634,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         tags.removeAll { $0.hasPrefix(tag) }
         guard tags.count < before else { return }
 
-        if let newData = try? PropertyListSerialization.data(fromPropertyList: tags, format: .binary, options: 0) {
+        if tags.isEmpty {
+            // 마지막 태그면 빈 배열 []을 남기지 않고 속성을 완전히 삭제 (CloudStorage에서 잔여 속성 방지)
+            removexattr(path, key, 0)
+        } else if let newData = try? PropertyListSerialization.data(fromPropertyList: tags, format: .binary, options: 0) {
             newData.withUnsafeBytes { ptr in
                 _ = setxattr(path, key, ptr.baseAddress, newData.count, 0, 0)
             }
@@ -617,13 +665,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func sendNotification(title: String, body: String) {
+    private func sendNotification(title: String, body: String, fallbackToAlert: Bool = false) {
+        logger.notice("sendNotification: \(title, privacy: .public) - \(body, privacy: .public)")
+
+        // 수동 변환: 알림 요약/권한 상태와 무관하게 즉각 피드백
+        if fallbackToAlert {
+            showAlert(title: title, body: body)
+        }
+
+        // 시스템 알림도 전송 (알림 센터 기록용)
+        let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = fallbackToAlert ? nil : .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        center.add(request) { error in
+            if let error {
+                logger.error("notification add failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func showAlert(title: String, body: String) {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = body
+            alert.alertStyle = .informational
+            let button = alert.addButton(withTitle: "확인 (3)")
+
+            // 매초 카운트다운 표시 후 자동 닫기
+            var remaining = 3
+            let timer = Timer(timeInterval: 1.0, repeats: true) { timer in
+                remaining -= 1
+                if remaining <= 0 {
+                    timer.invalidate()
+                    alert.window.close()
+                    NSApp.stopModal(withCode: .alertFirstButtonReturn)
+                } else {
+                    button.title = "확인 (\(remaining))"
+                }
+            }
+            RunLoop.current.add(timer, forMode: .modalPanel)
+
+            alert.runModal()
+            timer.invalidate()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

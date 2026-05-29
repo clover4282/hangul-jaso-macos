@@ -7,7 +7,8 @@ final class WorkflowInstaller {
     }()
 
     private let workflowNames = [
-        "한글 파일명 NFC 변환"
+        "한글 파일명 NFC 변환",
+        "한글 파일명 NFD 검사"
     ]
 
     var installedWorkflows: [String] {

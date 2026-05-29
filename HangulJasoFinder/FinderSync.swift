@@ -49,13 +49,9 @@ class FinderSyncExtension: FIFinderSync {
     // MARK: - Context Menu
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {
-        // 도구막대 클릭 시 팝업 없이 바로 실행
-        if menuKind == .toolbarItemMenu {
-            convertToNFC(nil)
-            return NSMenu()
-        }
-
+        // 컨텍스트 메뉴·툴바 클릭 모두 변환/검사 두 항목을 팝업으로 표시
         let menu = NSMenu(title: "")
+
         let convertItem = NSMenuItem(
             title: "한글 파일명 NFC 변환",
             action: #selector(convertToNFC(_:)),
@@ -64,42 +60,61 @@ class FinderSyncExtension: FIFinderSync {
         convertItem.image = Self.flagImage(size: 16)
         menu.addItem(convertItem)
 
+        let scanItem = NSMenuItem(
+            title: "한글 NFD 검사",
+            action: #selector(scanForNFD(_:)),
+            keyEquivalent: ""
+        )
+        scanItem.image = Self.flagImage(size: 16)
+        menu.addItem(scanItem)
+
         return menu
     }
 
     // MARK: - Actions
 
     @objc func convertToNFC(_ sender: AnyObject?) {
+        sendRequest(key: Self.pendingConvertKey, notification: "com.clover4282.hanguljaso.finderConvert")
+    }
+
+    @objc func scanForNFD(_ sender: AnyObject?) {
+        sendRequest(key: Self.pendingScanKey, notification: "com.clover4282.hanguljaso.finderScan")
+    }
+
+    /// 선택 항목 → 타깃 폴더 → Finder 열린 창 순으로 대상 경로를 잡아 App Group에 저장하고
+    /// Darwin notification으로 메인 앱에 신호 전송 (샌드박스 제약 없음)
+    private func sendRequest(key: String, notification: String) {
         let items = FIFinderSyncController.default().selectedItemURLs()
         let target = FIFinderSyncController.default().targetedURL()
 
+        let paths: [String]
         if let items, !items.isEmpty {
-            // 선택 항목을 App Group UserDefaults에 저장
-            savePaths(items.map(\.path))
+            paths = items.map(\.path)
         } else if let target {
-            savePaths([target.path])
+            paths = [target.path]
         } else {
             // CloudStorage(File Provider): selectedItemURLs/targetedURL 모두 nil
             // → 메인 앱이 AppleScript로 Finder 선택 항목을 가져오도록 표시
-            savePaths(["__FINDER_SELECTION__"])
+            paths = ["__FINDER_SELECTION__"]
         }
+        savePaths(paths, key: key)
 
-        // Darwin notification으로 메인 앱에 신호 전송 (샌드박스 제약 없음)
         let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterPostNotification(center, CFNotificationName("com.clover4282.hanguljaso.finderConvert" as CFString), nil, nil, true)
+        CFNotificationCenterPostNotification(center, CFNotificationName(notification as CFString), nil, nil, true)
 
-        logger.notice("convert request sent via Darwin notification")
+        logger.notice("request sent: \(notification, privacy: .public)")
     }
 
     private static let suiteName = "9P8DG7976Y.com.clover4282.hanguljaso"
-    private static let pendingKey = "pendingConvertPaths"
+    private static let pendingConvertKey = "pendingConvertPaths"
+    private static let pendingScanKey = "pendingScanPaths"
 
-    private func savePaths(_ paths: [String]) {
+    private func savePaths(_ paths: [String], key: String) {
         guard let defaults = UserDefaults(suiteName: Self.suiteName) else { return }
         // 기존 요청에 추가 (read-then-delete race 방지)
-        var existing = defaults.stringArray(forKey: Self.pendingKey) ?? []
+        var existing = defaults.stringArray(forKey: key) ?? []
         existing.append(contentsOf: paths)
-        defaults.set(existing, forKey: Self.pendingKey)
+        defaults.set(existing, forKey: key)
         defaults.synchronize()
     }
 }
