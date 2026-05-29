@@ -325,13 +325,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let url = URL(fileURLWithPath: path)
         // watched_folders.json 경로가 NFD로 저장돼 있어도 Swift String ==는 정규화 동등성으로 매칭됨
         let isWatchedRoot = loadWatchedFolders().contains { $0.path == path }
-        let name = (path as NSString).lastPathComponent
-        let nameIsNFD = !name.unicodeScalars.elementsEqual(name.precomposedStringWithCanonicalMapping.unicodeScalars)
-        if !isWatchedRoot && (contentFound || nameIsNFD) {
+        if !isWatchedRoot && (contentFound || isOnDiskNameNFD(path)) {
             addTag("NFD", to: url)
         } else if hasTag("NFD", at: url) {
             removeTag("NFD", from: url)
         }
+    }
+
+    /// 디스크 상의 실제 이름이 NFD인지 판정한다.
+    /// URL.path/NSString은 macOS에서 경로를 NFD로 분해하므로 이름 정규화 판정에 쓸 수 없다 →
+    /// 부모 디렉토리를 readdir해 원본 바이트로 확인한다. (열기 실패 시 false)
+    private func isOnDiskNameNFD(_ path: String) -> Bool {
+        let parent = (path as NSString).deletingLastPathComponent
+        let targetNFC = (path as NSString).lastPathComponent.precomposedStringWithCanonicalMapping
+        guard let dir = opendir(parent) else { return false }
+        defer { closedir(dir) }
+        while let entry = readdir(dir) {
+            let nameLen = Int(entry.pointee.d_namlen)
+            let rawName: String = withUnsafePointer(to: entry.pointee.d_name) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: nameLen) { buf in
+                    String(bytes: UnsafeBufferPointer(start: buf, count: nameLen), encoding: .utf8) ?? ""
+                }
+            }
+            let nfc = rawName.precomposedStringWithCanonicalMapping
+            if nfc == targetNFC {
+                return !rawName.unicodeScalars.elementsEqual(nfc.unicodeScalars)
+            }
+        }
+        return false
     }
 
     /// 단일 파일 이름이 NFD인지 검사해 태그 부착/정리. 반환: NFD 여부
