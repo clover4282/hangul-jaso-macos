@@ -694,10 +694,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             alert.messageText = title
             alert.informativeText = body
             alert.alertStyle = .informational
-            let button = alert.addButton(withTitle: "확인 (3)")
+            let button = alert.addButton(withTitle: "확인 (1)")
 
             // 매초 카운트다운 표시 후 자동 닫기
-            var remaining = 3
+            var remaining = 1
             let timer = Timer(timeInterval: 1.0, repeats: true) { timer in
                 remaining -= 1
                 if remaining <= 0 {
