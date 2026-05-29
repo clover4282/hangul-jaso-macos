@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import UserNotifications
 
 // MARK: - HangulJasoViewModel
 
@@ -172,23 +171,5 @@ final class HangulJasoViewModel {
         let appDir = appSupport.appendingPathComponent("HangulJaso", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent(Constants.Defaults.watchedFoldersFileName)
-    }
-
-    private func sendConversionNotification(converted: Int, total: Int) {
-        let content = UNMutableNotificationContent()
-        content.title = "한글 자소 정리"
-        content.body = "\(total)개 중 \(converted)개 파일을 NFC로 변환했습니다"
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-    }
-
-    private func sendDetectionNotification(count: Int) {
-        let content = UNMutableNotificationContent()
-        content.title = "한글 자소 정리"
-        content.body = "NFD 파일 \(count)개가 감지되었습니다"
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
     }
 }
