@@ -17,6 +17,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// In-flight scan guard (개선 5: 중복 실행 방지)
     private var isScanning = false
 
+    /// "하위 폴더 재귀 스캔" 설정 (미설정 시 기본 true). FSEvents 증분/변환 재스캔은 별도.
+    private var recursiveScanEnabled: Bool {
+        UserDefaults.standard.object(forKey: Constants.UserDefaultsKeys.recursiveScan) as? Bool ?? true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -118,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         DispatchQueue.global(qos: .userInitiated).async {
             NSLog("HangulJaso: full scan requested for %@", dirPath)
-            self.scanDirectory(dirPath)
+            self.scanDirectory(dirPath, recursive: self.recursiveScanEnabled)
         }
     }
 
@@ -312,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard FileManager.default.fileExists(atPath: cleanPath, isDirectory: &isDir) else { return nil }
         guard isDir.boolValue else { return scanSingleFile(cleanPath) }
 
-        let found = scanDirectory(cleanPath)
+        let found = scanDirectory(cleanPath, recursive: recursiveScanEnabled)
         // scanDirectory는 자식만 처리하므로 스캔한 폴더 자신의 태그를 재평가한다.
         reevaluateOwnTag(path: cleanPath, contentFound: found)
         return found
@@ -492,9 +497,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             defer { self.isScanning = false }
             let folders = self.loadWatchedFolders()
             NSLog("HangulJaso: scanning %d watched folders", folders.count)
+            let recursive = self.recursiveScanEnabled
             for folder in folders {
                 // NFD 파일에 태그만 부착 — 변환(rename)은 수동으로만 수행
-                self.scanDirectory(folder.path)
+                self.scanDirectory(folder.path, recursive: recursive)
             }
             NSLog("HangulJaso: scan complete")
         }
